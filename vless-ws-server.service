@@ -1,0 +1,28 @@
+[Unit]
+Description=VLESS WebSocket Server (Go)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# 部署前请修改为实际路径
+WorkingDirectory=/home/vless-ws-go
+ExecStart=/opt/vless-ws-go/vless-ws-server
+
+Restart=always
+RestartSec=5
+
+# 如需覆盖 config.go 中的默认值，取消注释并修改：
+#Environment=HOST=127.0.0.1
+#Environment=PORT=8081
+#Environment=WS_PATH=/api
+#Environment=UUID=your-uuid-here
+#Environment=TOKEN=your-token-here
+#Environment=IDLE_TIMEOUT_MS=120000
+#Environment=HEARTBEAT_MS=25000
+#Environment=CONNECT_TIMEOUT_MS=12000
+#Environment=LOG_LEVEL=info
+
+[Install]
+WantedBy=multi-user.target
