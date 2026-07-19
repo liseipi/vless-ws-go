@@ -212,8 +212,33 @@ func (s *Server) HandleSession(wsConn *websocket.Conn, remoteIP string) {
 	<-errCh // 等待另一方向 goroutine 结束，避免泄漏
 }
 
-// dialUpstream 先尝试直连，失败后走 NAT64 映射重试一次。
+// dialUpstream 先尝试直连，失败后走 NAT64 映射重试一次；
+// 整个"直连+NAT64兜底"作为一次尝试，外层按 cfg.ConnectRetries 指数退避重试，
+// 用来吸收目标网站/上游网络的瞬时抖动（超时、连接被重置等一次性问题）。
 func (s *Server) dialUpstream(ctx context.Context, addr string, port uint16, timeout time.Duration, sid string) (net.Conn, error) {
+	var lastErr error
+	attempts := s.cfg.ConnectRetries + 1
+	for attempt := 0; attempt < attempts; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(s.cfg.RetryBaseMS) * time.Duration(1<<uint(attempt-1)) * time.Millisecond
+			s.log.Debug(fmt.Sprintf("[%s] retry %d/%d connecting %s:%d in %s", sid, attempt, s.cfg.ConnectRetries, addr, port, backoff))
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff):
+			}
+		}
+		conn, err := s.dialUpstreamOnce(ctx, addr, port, timeout, sid)
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
+// dialUpstreamOnce 尝试一次直连，失败后走 NAT64 映射重试一次。
+func (s *Server) dialUpstreamOnce(ctx context.Context, addr string, port uint16, timeout time.Duration, sid string) (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: timeout}
 	target := net.JoinHostPort(addr, strconv.Itoa(int(port)))
 

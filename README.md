@@ -40,6 +40,9 @@ TOKEN= \
 IDLE_TIMEOUT_MS=120000 \
 HEARTBEAT_MS=25000 \
 CONNECT_TIMEOUT_MS=12000 \
+CONNECT_RETRIES=1 \
+RETRY_BASE_MS=200 \
+MAX_FRAME_BYTES=2097152 \
 LOG_LEVEL=info \
 ./vless-ws-server
 
@@ -49,7 +52,14 @@ uuidgen
 openssl rand -hex 24
 ```
 
-所有环境变量均可按需覆盖，不设额外必填项。
+所有环境变量均可按需覆盖，不设额外必填项。新增两项：
+
+- `CONNECT_RETRIES`（默认 `1`）/ `RETRY_BASE_MS`（默认 `200`）：连接目标网站失败时
+  （超时、连接被重置等一次性网络抖动）按指数退避自动重试，`RETRY_BASE_MS` 是重试
+  等待时间的基准，第 n 次重试大约等 `base × 2^(n-1)` 毫秒。设成 `0` 关闭重试。
+- `MAX_FRAME_BYTES`（默认 `2097152`，即 2MB）：单个 WebSocket 帧允许的最大字节数，
+  防止恶意构造的超大单帧占用过多内存（防御性配置，不影响正常转发，正常流量的
+  单帧远小于这个值）。设成 `0` 或负数表示不限制。
 
 健康检查：`GET /health` → `{"ok":true,"ts":...}`
 
@@ -57,6 +67,7 @@ openssl rand -hex 24
 
 - VLESS 握手 + IPv4 目标地址转发（本地 echo server 往返测试通过）
 - 错误 UUID 被正确拒绝并关闭连接
+- 上游连接失败时的指数退避重试逻辑（故意连一个必然拒绝的端口验证）
 - 编译通过 `go vet` 静态检查
 
 ## systemd 开机自启动

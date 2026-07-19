@@ -16,6 +16,9 @@ type Config struct {
 	IdleTimeoutMS     int64
 	HeartbeatMS       int64
 	ConnectTimeoutMS  int64
+	ConnectRetries    int   // 连接上游目标失败时的额外重试次数（不含首次尝试），指数退避
+	RetryBaseMS       int64 // 重试退避基准时间（毫秒）
+	MaxFrameBytes     int64 // 单个 WebSocket 帧允许的最大字节数，防止恶意超大单帧占用内存；<=0 表示不限制
 	LogLevel          string
 	MaxHeaderBufBytes int
 	// GOMAXPROCS 默认等于 CPU 核心数，Go runtime 自动利用多核。
@@ -48,6 +51,9 @@ func LoadConfig() *Config {
 		IdleTimeoutMS:     envInt64("IDLE_TIMEOUT_MS", 120000),
 		HeartbeatMS:       envInt64("HEARTBEAT_MS", 25000),
 		ConnectTimeoutMS:  envInt64("CONNECT_TIMEOUT_MS", 12000),
+		ConnectRetries:    int(envInt64("CONNECT_RETRIES", 1)),
+		RetryBaseMS:       envInt64("RETRY_BASE_MS", 200),
+		MaxFrameBytes:     envInt64("MAX_FRAME_BYTES", 2*1024*1024),
 		LogLevel:          envStr("LOG_LEVEL", "info"),
 		MaxHeaderBufBytes: 8192,
 		NumCPU:            runtime.NumCPU(),

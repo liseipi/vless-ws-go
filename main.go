@@ -66,7 +66,11 @@ func main() {
 			log.Debug("accept:", err.Error())
 			return
 		}
-		wsConn.SetReadLimit(-1) // 单帧大小不限制，由对端决定分帧策略
+		frameLimit := cfg.MaxFrameBytes
+		if frameLimit <= 0 {
+			frameLimit = -1
+		}
+		wsConn.SetReadLimit(frameLimit) // 单帧大小上限，防止恶意超大单帧占用内存；<=0 表示不限制
 
 		srv.HandleSession(wsConn, ip)
 	})
@@ -131,8 +135,13 @@ func printBanner(cfg *Config) {
 	}
 	fmt.Println(row(fmt.Sprintf("Token    : %s", tokState)))
 	fmt.Println(row("NAT64    : auto (system DNS -> DoH, TTL cache)"))
+	fmt.Println(row(fmt.Sprintf("Connect  : retries=%d base=%dms", cfg.ConnectRetries, cfg.RetryBaseMS)))
 	fmt.Println(row("Backpressure: native (blocking I/O via io.Copy)"))
-	fmt.Println(row("MaxPayload: unlimited, adaptive to peer frame size"))
+	frameDesc := "unlimited"
+	if cfg.MaxFrameBytes > 0 {
+		frameDesc = fmt.Sprintf("%d bytes", cfg.MaxFrameBytes)
+	}
+	fmt.Println(row(fmt.Sprintf("MaxFrame : %s", frameDesc)))
 	fmt.Println(row(fmt.Sprintf("Heartbeat: %dms   IdleTO: %dms", cfg.HeartbeatMS, cfg.IdleTimeoutMS)))
 	fmt.Println(row(fmt.Sprintf("GOMAXPROCS: %d (runtime auto multi-core)", cfg.NumCPU)))
 	fmt.Printf("╚%s╝\x1b[0m\n\n", bar)
