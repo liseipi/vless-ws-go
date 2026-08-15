@@ -12,7 +12,8 @@ vless-ws-go/
 ├── log.go        # 分级日志 + 失败限频
 ├── vless.go      # VLESS 协议头解析
 ├── nat64.go      # NAT64 解析（系统 DNS → DoH → TTL 缓存）
-└── session.go    # 核心会话：握手 + WS↔TCP 双向转发
+├── session.go    # 核心会话：握手 + WS↔TCP 双向转发（cmd=TCP）
+└── udp.go        # UDP 转发（cmd=UDP）：WS 长度前缀帧 ↔ UDP socket
 ```
 
 ## 安装
@@ -63,11 +64,29 @@ openssl rand -hex 24
 
 健康检查：`GET /health` → `{"ok":true,"ts":...}`
 
+## UDP 转发
+
+除了标准的 TCP 转发（VLESS `cmd=0x01`），现在也支持 UDP（`cmd=0x02`）：
+客户端发起一个 cmd=UDP 的 VLESS 请求，握手头里的地址就是这条连接固定转发
+的目标地址；握手完成后，WS 流里传输的不是原始字节，而是长度前缀帧
+（2 字节大端长度 + UDP 包内容）——WebSocket 本身不保留数据报边界，用长度
+前缀让两边能正确切出一个个独立的 UDP 包。
+
+服务端收到 cmd=UDP 后不会建 TCP 连接，而是建一个指向目标地址的 UDP
+socket，双向按长度前缀帧转发，直到连接关闭或者空闲超时（复用
+`IDLE_TIMEOUT_MS` 这个配置项）。
+
+这是配合客户端的 SOCKS5 UDP ASSOCIATE 实现的，主要场景是 DNS 查询这类
+UDP 流量——没有这个，走 SOCKS5 的 UDP 流量根本发不出去。
+
 ## 已验证
 
 - VLESS 握手 + IPv4 目标地址转发（本地 echo server 往返测试通过）
 - 错误 UUID 被正确拒绝并关闭连接
 - 上游连接失败时的指数退避重试逻辑（故意连一个必然拒绝的端口验证）
+- **UDP 转发**：配合客户端的 SOCKS5 UDP ASSOCIATE，用手写的 SOCKS5 UDP
+  测试脚本 + UDP echo 服务器做了完整的往返测试，包括单目标和"同时对三个
+  不同目标地址转发"（模拟同时查询多个 DNS 服务器）两种场景，都验证通过
 - 编译通过 `go vet` 静态检查
 
 ## systemd 开机自启动

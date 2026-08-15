@@ -161,11 +161,16 @@ func (s *Server) HandleSession(wsConn *websocket.Conn, remoteIP string) {
 		break
 	}
 
-	if hdr.Cmd != cmdTCP {
+	if hdr.Cmd != cmdTCP && hdr.Cmd != cmdUDP {
 		log.Warn(fmt.Sprintf("[%s] unsupported cmd 0x%02x", sid, hdr.Cmd))
 		return
 	}
 	tail := buf[hdr.HeaderLen:]
+
+	if hdr.Cmd == cmdUDP {
+		s.handleUDPSession(ctx, nc, wsConn, hdr, tail, sid, touch)
+		return
+	}
 
 	// ── 建立上游 TCP 连接（失败时尝试 NAT64 回退）───────────
 	connectTimeout := time.Duration(cfg.ConnectTimeoutMS) * time.Millisecond

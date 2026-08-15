@@ -10,6 +10,7 @@ import (
 const (
 	vlessVer   byte = 0x00
 	cmdTCP     byte = 0x01
+	cmdUDP     byte = 0x02
 	atypIPv4   byte = 0x01
 	atypDomain byte = 0x02
 	atypIPv6   byte = 0x03
