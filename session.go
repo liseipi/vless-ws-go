@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/hashicorp/yamux"
 )
 
 type Server struct {
@@ -58,10 +59,20 @@ func (t *touchReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// HandleSession 处理单个 WebSocket 连接的完整生命周期：
-// 解析 VLESS 头 → 建立上游 TCP（含 NAT64 回退）→ 双向转发直至任一侧关闭。
+// HandleSession 处理单条底层 WebSocket 连接的完整生命周期。
+//
+// 与之前"一条 WS 连接 = 一次 VLESS 会话"的模型不同，这里在 WS 连接之上
+// 建立一个 yamux 服务端多路复用会话：客户端可以在同一条 WS 连接上开出
+// 任意多个逻辑 stream，每个 stream 都是一次独立的 VLESS 请求（一次 TCP
+// CONNECT 或一个 UDP 目标），互不影响——某个 stream 出错或关闭，只影响
+// 这一个逻辑连接，不会波及同一 WS 连接上的其它 stream，更不会打断底层
+// WS 本身。这样客户端多个并发请求可以复用同一条已经完成 TLS+WS 握手
+// 的连接，避免重复握手开销。
+//
+// WS 连接本身的存活检测交给 yamux 内置的 keepalive 机制（映射自
+// cfg.HeartbeatMS），不再需要额外的 Ping/idle-watchdog goroutine。
 func (s *Server) HandleSession(wsConn *websocket.Conn, remoteIP string) {
-	sid := newSID()
+	cid := newSID()
 	cfg := s.cfg
 	log := s.log
 
@@ -69,9 +80,48 @@ func (s *Server) HandleSession(wsConn *websocket.Conn, remoteIP string) {
 	defer cancel()
 
 	nc := websocket.NetConn(ctx, wsConn, websocket.MessageBinary)
-	defer nc.Close()
 
-	// ── 空闲超时：用时间戳轮询而非每帧重建定时器 ──
+	ymCfg := yamux.DefaultConfig()
+	ymCfg.LogOutput = io.Discard // 用自己的 Logger，屏蔽 yamux 自带的标准库日志输出
+	ymCfg.EnableKeepAlive = true
+	if hb := time.Duration(cfg.HeartbeatMS) * time.Millisecond; hb > 0 {
+		ymCfg.KeepAliveInterval = hb
+	}
+	// keepalive 探测多次超时未响应即视为死连接；ConnectionWriteTimeout 控制单次写入的
+	// 最长阻塞时间，避免某次网络抖动导致 goroutine 永久卡死。
+	ymCfg.ConnectionWriteTimeout = 15 * time.Second
+
+	sess, err := yamux.Server(nc, ymCfg)
+	if err != nil {
+		log.Warn(fmt.Sprintf("[%s] yamux session init: %s", cid, err.Error()))
+		_ = nc.Close()
+		return
+	}
+	defer sess.Close()
+
+	log.Debug(fmt.Sprintf("[%s] session established from %s", cid, remoteIP))
+
+	for {
+		stream, err := sess.AcceptStream()
+		if err != nil {
+			log.Debug(fmt.Sprintf("[%s] session closed: %s", cid, err.Error()))
+			return
+		}
+		go s.handleStream(ctx, stream, remoteIP)
+	}
+}
+
+// handleStream 处理 yamux 会话里的单个 stream：解析 VLESS 头 → 建立上游
+// TCP/UDP 连接（含 NAT64 回退）→ 双向转发直至任一侧关闭。逻辑与之前
+// 直接处理整条 WS 连接时基本一致，只是读写对象从 WS NetConn 换成了
+// yamux 的 stream，且出错时只关闭这个 stream 而不是整条 WS 连接。
+func (s *Server) handleStream(ctx context.Context, stream *yamux.Stream, remoteIP string) {
+	sid := newSID()
+	cfg := s.cfg
+	log := s.log
+	defer stream.Close()
+
+	// ── 单个逻辑连接的空闲超时：用时间戳轮询而非每帧重建定时器 ──
 	var lastActivity int64
 	touch := func() { atomic.StoreInt64(&lastActivity, time.Now().UnixNano()) }
 	touch()
@@ -92,8 +142,8 @@ func (s *Server) HandleSession(wsConn *websocket.Conn, remoteIP string) {
 			case <-ticker.C:
 				last := time.Unix(0, atomic.LoadInt64(&lastActivity))
 				if time.Since(last) > idleTimeout {
-					log.Warn(fmt.Sprintf("[%s] idle timeout", sid))
-					_ = nc.Close()
+					log.Warn(fmt.Sprintf("[%s] stream idle timeout", sid))
+					_ = stream.Close()
 					return
 				}
 			}
@@ -101,38 +151,13 @@ func (s *Server) HandleSession(wsConn *websocket.Conn, remoteIP string) {
 	}()
 	defer close(idleDone)
 
-	// ── 服务端心跳：定期 Ping，coder/websocket 会自动等待 Pong 并处理，
-	//    超时或连接已关闭时 Ping 返回 error，视为僵尸连接直接关闭 ──
-	heartbeatInterval := time.Duration(cfg.HeartbeatMS) * time.Millisecond
-	hbDone := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(heartbeatInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-hbDone:
-				return
-			case <-ticker.C:
-				pingCtx, pingCancel := context.WithTimeout(ctx, heartbeatInterval)
-				err := wsConn.Ping(pingCtx)
-				pingCancel()
-				if err != nil {
-					log.Warn(fmt.Sprintf("[%s] zombie terminated (ping failed)", sid))
-					_ = nc.Close()
-					return
-				}
-			}
-		}
-	}()
-	defer close(hbDone)
-
 	// ── 阶段1：攒包解析 VLESS 头 ──────────────────────────
 	buf := make([]byte, 0, cfg.MaxHeaderBufBytes)
 	readBuf := make([]byte, 4096)
 	var hdr *vlessHeader
 
 	for {
-		n, err := nc.Read(readBuf)
+		n, err := stream.Read(readBuf)
 		if n > 0 {
 			touch()
 			buf = append(buf, readBuf[:n]...)
@@ -168,7 +193,7 @@ func (s *Server) HandleSession(wsConn *websocket.Conn, remoteIP string) {
 	tail := buf[hdr.HeaderLen:]
 
 	if hdr.Cmd == cmdUDP {
-		s.handleUDPSession(ctx, nc, wsConn, hdr, tail, sid, touch)
+		s.handleUDPSessionStream(ctx, stream, hdr, tail, sid, touch)
 		return
 	}
 
@@ -177,7 +202,8 @@ func (s *Server) HandleSession(wsConn *websocket.Conn, remoteIP string) {
 	tcpConn, err := s.dialUpstream(ctx, hdr.Addr, hdr.Port, connectTimeout, sid)
 	if err != nil {
 		log.Warn(fmt.Sprintf("[%s] connect failed %s:%d: %s", sid, hdr.Addr, hdr.Port, err.Error()))
-		_ = wsConn.Close(websocket.StatusInternalError, "connect failed")
+		// 只关闭这一个逻辑 stream，不影响同一 WS 连接上的其它并发请求。
+		_ = stream.Close()
 		return
 	}
 	defer tcpConn.Close()
@@ -189,7 +215,7 @@ func (s *Server) HandleSession(wsConn *websocket.Conn, remoteIP string) {
 	}
 
 	// VLESS 响应头：版本 + 附加信息长度(0)
-	if _, err := nc.Write([]byte{vlessVer, 0x00}); err != nil {
+	if _, err := stream.Write([]byte{vlessVer, 0x00}); err != nil {
 		log.Debug(fmt.Sprintf("[%s] write vless resp: %s", sid, err.Error()))
 		return
 	}
@@ -207,13 +233,13 @@ func (s *Server) HandleSession(wsConn *websocket.Conn, remoteIP string) {
 	errCh := make(chan error, 2)
 
 	go func() {
-		_, err := io.Copy(tcpConn, &touchReader{r: nc, touch: touch})
+		_, err := io.Copy(tcpConn, &touchReader{r: stream, touch: touch})
 		_ = tcpConn.Close() // 半关闭：驱动另一方向尽快退出
 		errCh <- err
 	}()
 
-	_, err = io.Copy(nc, &touchReader{r: tcpConn, touch: touch})
-	_ = nc.Close()
+	_, err = io.Copy(stream, &touchReader{r: tcpConn, touch: touch})
+	_ = stream.Close()
 	<-errCh // 等待另一方向 goroutine 结束，避免泄漏
 }
 

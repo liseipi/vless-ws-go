@@ -8,8 +8,6 @@ import (
 	"net"
 	"strconv"
 	"time"
-
-	"github.com/coder/websocket"
 )
 
 const maxUDPPacketSize = 65507 // UDP 单包理论最大载荷（IPv4）
@@ -121,10 +119,11 @@ func (p *prefixReader) Read(b []byte) (int, error) {
 	return p.r.Read(b)
 }
 
-func (s *Server) handleUDPSession(
+// handleUDPSessionStream 处理一个 yamux stream 上的 UDP 会话。与 TCP 一样，
+// 出错时只关闭这一个 stream，不影响同一 WS 连接上的其它并发请求。
+func (s *Server) handleUDPSessionStream(
 	ctx context.Context,
-	nc io.ReadWriteCloser,
-	wsConn *websocket.Conn,
+	stream io.ReadWriteCloser,
 	hdr *vlessHeader,
 	tail []byte,
 	sid string,
@@ -136,20 +135,20 @@ func (s *Server) handleUDPSession(
 	cancel()
 	if err != nil {
 		s.log.Warn(fmt.Sprintf("[%s] udp connect failed %s:%d: %s", sid, hdr.Addr, hdr.Port, err.Error()))
-		_ = wsConn.Close(websocket.StatusInternalError, "connect failed")
+		_ = stream.Close()
 		return
 	}
 	defer udpConn.Close()
 
-	if _, err := nc.Write([]byte{vlessVer, 0x00}); err != nil {
+	if _, err := stream.Write([]byte{vlessVer, 0x00}); err != nil {
 		s.log.Debug(fmt.Sprintf("[%s] write vless resp: %s", sid, err.Error()))
 		return
 	}
 
-	reader := &prefixReader{prefix: tail, r: nc}
+	reader := &prefixReader{prefix: tail, r: stream}
 
 	idleTimeout := time.Duration(s.cfg.IdleTimeoutMS) * time.Millisecond
-	relayUDP(&udpReadWriteCloser{Reader: reader, Writer: nc, Closer: nc}, udpConn, idleTimeout, touch)
+	relayUDP(&udpReadWriteCloser{Reader: reader, Writer: stream, Closer: stream}, udpConn, idleTimeout, touch)
 }
 
 type udpReadWriteCloser struct {
