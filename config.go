@@ -21,6 +21,7 @@ type Config struct {
 	MaxFrameBytes     int64 // 单个 WebSocket 帧允许的最大字节数，防止恶意超大单帧占用内存；<=0 表示不限制
 	LogLevel          string
 	MaxHeaderBufBytes int
+	YamuxWindowBytes  uint32 // 单个 yamux stream 的接收窗口大小，见 session.go 里的说明
 	// GOMAXPROCS 默认等于 CPU 核心数，Go runtime 自动利用多核。
 	NumCPU int
 }
@@ -56,6 +57,13 @@ func LoadConfig() *Config {
 		MaxFrameBytes:     envInt64("MAX_FRAME_BYTES", 2*1024*1024),
 		LogLevel:          envStr("LOG_LEVEL", "info"),
 		MaxHeaderBufBytes: 8192,
-		NumCPU:            runtime.NumCPU(),
+		// yamux 默认单流窗口只有 256KB，在有一定延迟的链路上会严重限制单个
+		// stream（比如一次大文件传输）的吞吐量——发送方发满 256KB 未确认数据
+		// 就必须停下来等对端的窗口更新，相当于每 256KB 就insert一次往返等待。
+		// 这里默认给到 16MB，通过 YAMUX_WINDOW_KB 可以按你的链路带宽时延积
+		// （带宽 x RTT）调整：数值越大，大文件吞吐上限越高，但会增加每个
+		// stream 的内存占用（默认配置下每个并发连接最多占这么多接收缓冲）。
+		YamuxWindowBytes: uint32(envInt64("YAMUX_WINDOW_KB", 16*1024)) * 1024,
+		NumCPU:           runtime.NumCPU(),
 	}
 }

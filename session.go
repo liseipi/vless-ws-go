@@ -90,6 +90,11 @@ func (s *Server) HandleSession(wsConn *websocket.Conn, remoteIP string) {
 	// keepalive 探测多次超时未响应即视为死连接；ConnectionWriteTimeout 控制单次写入的
 	// 最长阻塞时间，避免某次网络抖动导致 goroutine 永久卡死。
 	ymCfg.ConnectionWriteTimeout = 15 * time.Second
+	// 见 config.go 里 YamuxWindowBytes 的注释：默认 256KB 的窗口会严重限制
+	// 单个 stream（比如大文件传输）的吞吐量，这里换成更大的窗口。
+	if cfg.YamuxWindowBytes > 0 {
+		ymCfg.MaxStreamWindowSize = cfg.YamuxWindowBytes
+	}
 
 	sess, err := yamux.Server(nc, ymCfg)
 	if err != nil {
