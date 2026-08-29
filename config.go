@@ -63,7 +63,7 @@ func LoadConfig() *Config {
 		// 这里默认给到 16MB，通过 YAMUX_WINDOW_KB 可以按你的链路带宽时延积
 		// （带宽 x RTT）调整：数值越大，大文件吞吐上限越高，但会增加每个
 		// stream 的内存占用（默认配置下每个并发连接最多占这么多接收缓冲）。
-		YamuxWindowBytes: uint32(envInt64("YAMUX_WINDOW_KB", 16*1024)) * 1024,
+		YamuxWindowBytes: uint32(envInt64("YAMUX_WINDOW_KB", 20*1024)) * 1024,
 		NumCPU:           runtime.NumCPU(),
 	}
 }
