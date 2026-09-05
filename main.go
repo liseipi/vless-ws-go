@@ -51,8 +51,16 @@ func main() {
 			}
 			a, b := []byte(tok), []byte(cfg.Token)
 			if len(a) != len(b) || subtle.ConstantTimeCompare(a, b) != 1 {
-				srv.authFail.shouldLog(ip)
-				log.Warn(fmt.Sprintf("[auth] fail from %s", ip))
+				// 【修复】之前这里的返回值被丢弃，导致下面 log.Warn 无条件执行，
+				// 限频形同虚设——被扫描/暴力尝试时日志会被刷爆。现在真正按
+				// shouldLog 的结果决定是否打印，命中限流窗口时只打一条汇总。
+				if doLog, count := srv.authFail.shouldLog(ip); doLog {
+					if count > 0 {
+						log.Warn(fmt.Sprintf("[auth] fail from %s (最近这段时间内共 %d 次)", ip, count))
+					} else {
+						log.Warn(fmt.Sprintf("[auth] fail from %s", ip))
+					}
+				}
 				http.Error(w, "Forbidden", http.StatusForbidden)
 				return
 			}

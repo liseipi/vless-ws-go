@@ -1,1 +1,38 @@
-.idea
+# 编译产物
+/vless-ws-server
+/vless-ws-server-*
+*.exe
+*.out
+*.test
+*.prof
+
+# Go 依赖缓存与工具
+/vendor/
+
+# IDE / 编辑器
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 系统文件
+Thumbs.db
+Desktop.ini
+
+# 日志与临时文件
+*.log
+/tmp/
+*.tmp
+*.bak
+*.orig
+
+# 环境与密钥配置（含敏感信息）
+.env
+.env.*
+*.pem
+*.key
+*.crt
+config.local.json

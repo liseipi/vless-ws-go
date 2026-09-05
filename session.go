@@ -32,7 +32,7 @@ func NewServer(cfg *Config, log *Logger) (*Server, error) {
 	return &Server{
 		cfg:      cfg,
 		log:      log,
-		resolver: NewNAT64Resolver(log),
+		resolver: NewNAT64Resolver(log, cfg.NAT64Prefix),
 		srvUUID:  uuidBytes,
 		authFail: newFailRateLimiter(60 * time.Second),
 	}, nil
@@ -87,9 +87,16 @@ func (s *Server) HandleSession(wsConn *websocket.Conn, remoteIP string) {
 	if hb := time.Duration(cfg.HeartbeatMS) * time.Millisecond; hb > 0 {
 		ymCfg.KeepAliveInterval = hb
 	}
-	// keepalive 探测多次超时未响应即视为死连接；ConnectionWriteTimeout 控制单次写入的
-	// 最长阻塞时间，避免某次网络抖动导致 goroutine 永久卡死。
-	ymCfg.ConnectionWriteTimeout = 15 * time.Second
+	// keepalive ping 等待确认的最长时间，超时会判定整条底层连接已死，直接
+	// 关闭该连接上复用的【所有】stream，不是只关一个。之前这里写死 15 秒，
+	// 配合较大的 MaxStreamWindowSize（默认 20MB）在高延迟或突发大流量占满
+	// 带宽的场景下，keepalive 的 ping/pong 有一定概率在 15 秒内收不到确认，
+	// 造成一次普通的网络抖动就打断了同一条 WS 连接上所有并发请求。现在改成
+	// 可配置（YAMUX_WRITE_TIMEOUT_MS），链路质量一般或者调大过窗口的话建议
+	// 适当调大这个值。
+	if wt := time.Duration(cfg.YamuxWriteTimeoutMS) * time.Millisecond; wt > 0 {
+		ymCfg.ConnectionWriteTimeout = wt
+	}
 	// 见 config.go 里 YamuxWindowBytes 的注释：默认 256KB 的窗口会严重限制
 	// 单个 stream（比如大文件传输）的吞吐量，这里换成更大的窗口。
 	if cfg.YamuxWindowBytes > 0 {
@@ -183,8 +190,16 @@ func (s *Server) handleStream(ctx context.Context, stream *yamux.Stream, remoteI
 			continue
 		}
 		if perr != nil {
-			log.Warn(fmt.Sprintf("[%s] header: %s", sid, perr.Error()))
-			s.authFail.shouldLog(remoteIP) // 复用限频记录（UUID 错误也算鉴权失败）
+			// 【修复】之前 log.Warn 是无条件执行的，shouldLog 的返回值被丢弃，
+			// 限频没有真正生效。现在改成用 shouldLog 的结果决定是否打印，
+			// 命中限流窗口时打一条带汇总次数的日志，避免被扫描/爆破刷屏。
+			if doLog, count := s.authFail.shouldLog(remoteIP); doLog {
+				if count > 0 {
+					log.Warn(fmt.Sprintf("[%s] header: %s (来自 %s 最近这段时间内共 %d 次)", sid, perr.Error(), remoteIP, count))
+				} else {
+					log.Warn(fmt.Sprintf("[%s] header: %s", sid, perr.Error()))
+				}
+			}
 			return
 		}
 		hdr = h

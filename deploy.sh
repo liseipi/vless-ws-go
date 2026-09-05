@@ -18,6 +18,7 @@ APP_NAME="vless-ws-server"
 INSTALL_DIR="/opt/vless-ws-go"
 SERVICE_SRC="./vless-ws-server.service"
 SERVICE_DST="/etc/systemd/system/${APP_NAME}.service"
+ENV_FILE="./server.env"
 
 info()  { echo -e "\033[36m[deploy]\033[0m $*"; }
 warn()  { echo -e "\033[33m[deploy]\033[0m $*"; }
@@ -25,6 +26,22 @@ error() { echo -e "\033[31m[deploy]\033[0m $*" >&2; }
 
 if [ ! -f "./main.go" ] || [ ! -f "$SERVICE_SRC" ]; then
   error "请在项目根目录（含 main.go 和 vless-ws-server.service 的目录）下运行本脚本"
+  exit 1
+fi
+
+# ── 0. 配置文件校验 ──────────────────────────────────────
+# UUID 不再有硬编码默认值，缺少 server.env 或者 UUID 没填的话服务端启动会
+# 直接失败，这里提前拦下来，避免部署到一半才发现。
+if [ ! -f "$ENV_FILE" ]; then
+  error "找不到 ${ENV_FILE}，请先执行："
+  error "  cp server.env.example ${ENV_FILE}"
+  error "然后编辑 ${ENV_FILE}，务必换成你自己生成的 UUID（不要用示例里的占位值）"
+  exit 1
+fi
+
+ENV_UUID="$(grep -E '^UUID=' "$ENV_FILE" | tail -n1 | cut -d= -f2- | tr -d '"')"
+if [ -z "$ENV_UUID" ] || [ "$ENV_UUID" = "替换成你自己生成的随机UUID，例如用 uuidgen 生成" ]; then
+  error "${ENV_FILE} 里的 UUID 还没有设置成你自己的值（或者还是示例占位值），请先编辑好再部署"
   exit 1
 fi
 
@@ -58,6 +75,10 @@ fi
 info "复制新二进制到 ${INSTALL_DIR}/"
 sudo cp "${APP_NAME}" "${INSTALL_DIR}/"
 sudo chmod +x "${INSTALL_DIR}/${APP_NAME}"
+
+info "同步 ${ENV_FILE} 到 ${INSTALL_DIR}/server.env（systemd EnvironmentFile 会从这里读取 UUID/TOKEN 等）"
+sudo cp "${ENV_FILE}" "${INSTALL_DIR}/server.env"
+sudo chmod 600 "${INSTALL_DIR}/server.env" # 含密钥，收紧权限，只有 root 可读
 
 # ── 3. 安装/更新 systemd 服务文件 ────────────────────────
 info "安装 systemd 服务文件"
