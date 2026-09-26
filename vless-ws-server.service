@@ -6,15 +6,19 @@ Wants=network-online.target
 [Service]
 Type=simple
 
-# 部署前请修改为实际路径
-WorkingDirectory=/home/vless-ws-go
-ExecStart=/home/vless-ws-go/vless-ws-server
+# 工作目录 / 可执行文件路径。这 3 个路径（WorkingDirectory、ExecStart、EnvironmentFile）
+# 会在 deploy.sh 安装时按实际安装目录（INSTALL_DIR，默认 /opt/vless-ws-go）自动重写，
+# 所以正常走 deploy.sh 部署时不需要改这里。
+# 只有手动部署（不走 deploy.sh）时才需要把这些路径改成你真实的安装目录，
+# 路径写错会导致 systemd 找不到可执行文件，状态显示 "Result: resources"。
+WorkingDirectory=/opt/vless-ws-go
+ExecStart=/opt/vless-ws-go/vless-ws-server
 
 # 从这个文件加载 UUID/TOKEN 等环境变量，由 deploy.sh 从
 # server.env（cp server.env.example 而来）自动同步过来。
 # 该文件缺失或里面没有设置 UUID 时，服务会拒绝启动（config.go 里的校验），
 # 不会再有任何默认凭据可用，这是有意为之的安全设计。
-EnvironmentFile=/home/vless-ws-go/server.env
+EnvironmentFile=/opt/vless-ws-go/server.env
 
 Restart=always
 RestartSec=5

@@ -128,9 +128,20 @@ sudo cp "${ENV_FILE}" "${INSTALL_DIR}/server.env"
 sudo chmod 600 "${INSTALL_DIR}/server.env" # 含密钥，收紧权限，只有 root 可读
 
 # ── 4. 安装/更新 systemd 服务文件 ────────────────────────
-info "安装 systemd 服务文件"
-sudo cp "$SERVICE_SRC" "$SERVICE_DST"
+# 单元文件里的 WorkingDirectory / ExecStart / EnvironmentFile 统一按 ${INSTALL_DIR}
+# 重写，保证和本脚本实际部署的目录一致。否则一旦两边路径不一致，systemd 会因为
+# 找不到可执行文件/环境文件而启动失败，此时状态会显示 "Result: resources"、
+# CPU 恒为 0，日志里也看不到任何程序本身的输出（因为进程根本没被拉起来）。
+info "安装 systemd 服务文件（工作目录 ${INSTALL_DIR}）"
+sed -e "s|^WorkingDirectory=.*|WorkingDirectory=${INSTALL_DIR}|" \
+    -e "s|^ExecStart=.*|ExecStart=${INSTALL_DIR}/${APP_NAME}|" \
+    -e "s|^EnvironmentFile=.*|EnvironmentFile=${INSTALL_DIR}/server.env|" \
+    "$SERVICE_SRC" | sudo tee "$SERVICE_DST" >/dev/null
 sudo systemctl daemon-reload
+
+# 上一个版本如果一直启动失败，可能已经触发 systemd 的启动频率限制
+# （"Start request repeated too quickly"），不清掉的话 restart 会直接被拒绝。
+sudo systemctl reset-failed "${APP_NAME}" 2>/dev/null || true
 
 if [ "$FIRST_DEPLOY" = true ]; then
   info "首次部署：enable + 启动服务"
