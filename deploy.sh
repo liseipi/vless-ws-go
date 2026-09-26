@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 一键部署 / 更新 vless-ws-server。
 # 初次部署和后续更新都用这一个脚本，逻辑完全一样：
-#   编译 -> 备份旧二进制 -> 部署新二进制 -> 装/更新 systemd 服务
+#   检查/安装 Go -> 编译 -> 备份旧二进制 -> 部署新二进制 -> 装/更新 systemd 服务
 #   -> daemon-reload -> enable --now / restart -> 校验服务确实启动成功
 #
 # 用法（在项目根目录，也就是 main.go 所在目录下执行）：
@@ -45,7 +45,54 @@ if [ -z "$ENV_UUID" ] || [ "$ENV_UUID" = "替换成你自己生成的随机UUID�
   exit 1
 fi
 
-# ── 1. 编译 ──────────────────────────────────────────────
+# ── 1. 检查 Go 环境（缺失时用 snap 安装 1.22）─────────────
+GO_SNAP_CHANNEL="1.22/stable"
+GO_REQUIRED="$(awk '/^go[[:space:]]/{print $2; exit}' go.mod 2>/dev/null || true)"
+
+# 版本比较：version_ge A B 表示 A >= B
+version_ge() {
+  [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]
+}
+
+if command -v go >/dev/null 2>&1; then
+  info "检测到已安装 Go：$(go version)"
+else
+  warn "未检测到 Go，尝试通过 snap 安装（channel=${GO_SNAP_CHANNEL}）..."
+
+  if ! command -v snap >/dev/null 2>&1; then
+    error "系统未安装 snap，无法自动安装 Go。"
+    error "请先安装 snapd 后重试，或手动安装 Go >= ${GO_REQUIRED:-1.22}：https://go.dev/dl/"
+    exit 1
+  fi
+
+  sudo snap install go --channel="${GO_SNAP_CHANNEL}" --classic
+  hash -r 2>/dev/null || true
+
+  # snap 安装的 go 位于 /snap/bin，当前 shell 的 PATH 可能还没生效，这里补一下
+  if ! command -v go >/dev/null 2>&1 && [ -x /snap/bin/go ]; then
+    export PATH="/snap/bin:${PATH}"
+    hash -r 2>/dev/null || true
+  fi
+
+  if ! command -v go >/dev/null 2>&1; then
+    error "Go 安装后仍未找到 go 命令，请重新登录 shell（或手动把 /snap/bin 加入 PATH）后再运行本脚本"
+    exit 1
+  fi
+  info "Go 安装完成：$(go version)"
+fi
+
+# go.mod 要求的最低版本校验，版本过低时给出升级提示（不强制中断）
+if [ -n "${GO_REQUIRED}" ]; then
+  GO_CURRENT="$(go version | awk '{print $3}' | sed 's/^go//')"
+  if ! version_ge "${GO_CURRENT}" "${GO_REQUIRED}"; then
+    warn "当前 Go 版本 ${GO_CURRENT} 低于 go.mod 要求的 ${GO_REQUIRED}，编译可能失败。"
+    warn "可通过 snap 升级到 1.22："
+    warn "  sudo snap install go --channel=${GO_SNAP_CHANNEL} --classic   # 未安装时"
+    warn "  sudo snap refresh go --channel=${GO_SNAP_CHANNEL} --classic   # 已安装时"
+  fi
+fi
+
+# ── 2. 编译 ──────────────────────────────────────────────
 info "拉取依赖 (go mod tidy) ..."
 go mod tidy
 
@@ -53,7 +100,7 @@ info "编译 ${APP_NAME} ..."
 go build -o "${APP_NAME}" .
 info "编译完成：$(du -h "${APP_NAME}" | cut -f1)"
 
-# ── 2. 部署二进制（先备份旧的，新的启动失败时方便回滚）──────
+# ── 3. 部署二进制（先备份旧的，新的启动失败时方便回滚）──────
 FIRST_DEPLOY=true
 if [ -f "${INSTALL_DIR}/${APP_NAME}" ]; then
   FIRST_DEPLOY=false
@@ -80,7 +127,7 @@ info "同步 ${ENV_FILE} 到 ${INSTALL_DIR}/server.env（systemd EnvironmentFile
 sudo cp "${ENV_FILE}" "${INSTALL_DIR}/server.env"
 sudo chmod 600 "${INSTALL_DIR}/server.env" # 含密钥，收紧权限，只有 root 可读
 
-# ── 3. 安装/更新 systemd 服务文件 ────────────────────────
+# ── 4. 安装/更新 systemd 服务文件 ────────────────────────
 info "安装 systemd 服务文件"
 sudo cp "$SERVICE_SRC" "$SERVICE_DST"
 sudo systemctl daemon-reload
@@ -93,7 +140,7 @@ else
   sudo systemctl restart "${APP_NAME}"
 fi
 
-# ── 4. 校验服务确实启动成功 ──────────────────────────────
+# ── 5. 校验服务确实启动成功 ──────────────────────────────
 # 给服务几秒钟时间起来，避免启动瞬间的状态误判为失败
 sleep 2
 
